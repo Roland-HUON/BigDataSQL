@@ -1,0 +1,13 @@
+{
+  "name": "bigdatasql",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "db:schema": "node scripts/db.mjs schema",
+    "db:seed": "node scripts/db.mjs seed",
+    "db:reset": "node scripts/db.mjs reset"
+  },
+  "dependencies": {
+    "pg": "^8.23.1"
+  }
+}
