@@ -39,21 +39,38 @@ from generate_series(1, 500) i,
 -- ---------------------------------------------------------------------
 --  addresses (1 à 3 par utilisateur, la 1re est l'adresse par défaut pour 90 %)
 -- ---------------------------------------------------------------------
--- villes et pays associés (même position dans les deux tableaux)
-with cities as (select array['75001 Paris','69002 Lyon','13001 Marseille','33000 Bordeaux','59000 Lille',
-                             '31000 Toulouse','44000 Nantes','67000 Strasbourg','1000 Bruxelles','1201 Genève'] a,
-                       array['FR','FR','FR','FR','FR','FR','FR','FR','BE','CH'] c),
-     streets as (select array['rue de la Paix','avenue Victor Hugo','boulevard Voltaire','rue Nationale',
+-- 40 villes (table temporaire, supprimée à la fin de la transaction)
+create temp table seed_cities (idx int primary key, postal_code text, city text, country char(2)) on commit drop;
+insert into seed_cities
+select row_number() over (), pc, c, co
+from (values
+  ('75001','Paris','FR'), ('13001','Marseille','FR'), ('69001','Lyon','FR'), ('31000','Toulouse','FR'),
+  ('06000','Nice','FR'), ('44000','Nantes','FR'), ('34000','Montpellier','FR'), ('67000','Strasbourg','FR'),
+  ('33000','Bordeaux','FR'), ('59000','Lille','FR'), ('1201','Genève','CH'), ('1000','Bruxelles','BE'),
+  ('35000','Rennes','FR'), ('51100','Reims','FR'), ('83000','Toulon','FR'), ('8001','Zurich','CH'),
+  ('42000','Saint-Étienne','FR'), ('76600','Le Havre','FR'), ('38000','Grenoble','FR'), ('2000','Anvers','BE'),
+  ('21000','Dijon','FR'), ('49000','Angers','FR'), ('30000','Nîmes','FR'), ('1003','Lausanne','CH'),
+  ('63000','Clermont-Ferrand','FR'), ('72000','Le Mans','FR'), ('13100','Aix-en-Provence','FR'), ('9000','Gand','BE'),
+  ('29200','Brest','FR'), ('37000','Tours','FR'), ('80000','Amiens','FR'), ('3011','Berne','CH'),
+  ('87000','Limoges','FR'), ('74000','Annecy','FR'), ('66000','Perpignan','FR'), ('4000','Liège','BE'),
+  ('57000','Metz','FR'), ('25000','Besançon','FR'), ('4051','Bâle','CH'), ('5000','Namur','BE')
+) v(pc, c, co);
+
+-- Ville tirée au hasard, les premières de la liste (grandes villes) plus souvent
+-- => certaines villes ont beaucoup de commandes, d'autres moins de 30
+with streets as (select array['rue de la Paix','avenue Victor Hugo','boulevard Voltaire','rue Nationale',
                               'rue des Lilas','place de la République','rue du Moulin','allée des Pins'] a)
-insert into addresses (user_id, address, place, country, default_delivery)
+insert into addresses (user_id, address, postal_code, city, place, country, default_delivery)
 select u.id,
-       (1 + floor(random() * 150))::int || ' ' || (select a from streets)[1 + (u.id + n) % 8] || ', '
-         || (select a from cities)[1 + (u.id * 3 + n) % 10],
+       (1 + floor(random() * 150))::int || ' ' || (select a from streets)[1 + (u.id + n) % 8],
+       sc.postal_code, sc.city,
        (array['Maison','Travail','Parents', null])[n],
-       (select c from cities)[1 + (u.id * 3 + n) % 10],
+       sc.country,
        n = 1 and u.id % 10 <> 0
 from users u
-cross join lateral generate_series(1, 1 + (u.id % 3)) n;
+cross join lateral generate_series(1, 1 + (u.id % 3)) n
+cross join lateral (select 1 + floor(40 * power(random(), 1.6))::int + 0 * n as k) r  -- "0 * n" : tirage à chaque ligne
+join seed_cities sc on sc.idx = r.k;
 
 -- ---------------------------------------------------------------------
 --  brands (50)
@@ -106,6 +123,9 @@ from products p
 cross join lateral (select (array['XS','S','M','L','XL','XXL'])[1 + (p.id + k) % 6] s from generate_series(0, 2) k) sizes
 cross join lateral (select (array['noir','blanc','bleu','rouge','vert','gris'])[1 + (p.id + k * 3) % 6] c from generate_series(0, 1) k) colors;
 
+-- 1 variante sur 20 retirée de la vente dans les 300 derniers jours
+update variants set deactivated_at = now() - random() * interval '300 days' where id % 20 = 0;
+
 -- ---------------------------------------------------------------------
 --  prices : par variante
 --    FR/EUR : ancien prix (3 ans -> 6 mois) puis prix actuel (sans fin)
@@ -132,8 +152,10 @@ select u.id, now() - random() * interval '60 days'
 from users u where u.id % 5 <> 0 and u.id <= 250;
 
 insert into cart_items (cart_id, variant_id, quantity)
-select c.id, 1 + floor(random() * 1800)::int, 1 + floor(random() * 3)::int
-from carts c cross join lateral generate_series(1, 1 + (c.id % 5)) n
+select x.cart_id, x.variant_id, x.qty
+from (select c.id cart_id, 1 + floor(random() * 1800)::int variant_id, 1 + floor(random() * 3)::int qty
+      from carts c cross join lateral generate_series(1, 1 + (c.id % 5)) n) x
+join variants v on v.id = x.variant_id and v.deactivated_at is null  -- pas de variante retirée dans un panier
 on conflict do nothing;
 
 -- ---------------------------------------------------------------------
@@ -191,6 +213,7 @@ declare
   v_red    numeric;
   v_order  bigint;
   v_email  text;
+  v_k      integer;
 begin
   for i in 1 .. 2000 loop
     v_date := now() - random() * interval '700 days';
@@ -207,6 +230,14 @@ begin
     end if;
     -- sinon (ou si aucun client n'était actif à cette date) : invité
     v_email := coalesce(v_user.email, 'invite' || (1 + floor(random() * 250))::int || '@example.org');
+
+    -- invité : adresse de livraison dans une ville tirée au hasard
+    if v_addr.id is null then
+      v_k := 1 + floor(40 * power(random(), 1.6))::int;  -- tiré une seule fois
+      select (1 + i % 120) || ' rue du Commerce', sc.postal_code, sc.city, sc.country
+        into v_addr.address, v_addr.postal_code, v_addr.city, v_addr.country
+      from seed_cities sc where sc.idx = v_k;
+    end if;
 
     -- État selon l'ancienneté
     v_state := case
@@ -226,26 +257,26 @@ begin
     end if;
 
     begin
-      insert into orders (user_id, first_name, last_name, email, shipping_address, shipping_place,
-                          shipping_country, order_date, state, currency, promo_code_id)
+      insert into orders (user_id, first_name, last_name, email, shipping_address, shipping_postal_code,
+                          shipping_city, shipping_place, shipping_country, order_date, state, currency, promo_code_id)
       values (v_user.id,
               coalesce(v_user.first_name, (array['Paul','Marie','Yanis','Zoé'])[1 + i % 4]),
               coalesce(v_user.last_name,  (array['Blanc','Noir','Morel','Faure'])[1 + i % 4]),
               v_email,
-              coalesce(v_addr.address, (1 + i % 120) || ' rue du Commerce, 75015 Paris'),
-              v_addr.place, coalesce(v_addr.country, 'FR'), v_date, v_state, 'EUR', v_code)
+              v_addr.address, v_addr.postal_code, v_addr.city,
+              v_addr.place, v_addr.country, v_date, v_state, 'EUR', v_code)
       returning id into v_order;
     exception when raise_exception then
       -- code refusé par le trigger (épuisé, réservé, déjà utilisé...) => commande sans code
       v_code := null;
-      insert into orders (user_id, first_name, last_name, email, shipping_address, shipping_place,
-                          shipping_country, order_date, state, currency)
+      insert into orders (user_id, first_name, last_name, email, shipping_address, shipping_postal_code,
+                          shipping_city, shipping_place, shipping_country, order_date, state, currency)
       values (v_user.id,
               coalesce(v_user.first_name, (array['Paul','Marie','Yanis','Zoé'])[1 + i % 4]),
               coalesce(v_user.last_name,  (array['Blanc','Noir','Morel','Faure'])[1 + i % 4]),
               v_email,
-              coalesce(v_addr.address, (1 + i % 120) || ' rue du Commerce, 75015 Paris'),
-              v_addr.place, coalesce(v_addr.country, 'FR'), v_date, v_state, 'EUR')
+              v_addr.address, v_addr.postal_code, v_addr.city,
+              v_addr.place, v_addr.country, v_date, v_state, 'EUR')
       returning id into v_order;
     end;
 
@@ -259,8 +290,22 @@ begin
     from (select distinct on (variant_id) variant_id, qty
           from (select 1 + floor(random() * 1800)::int variant_id, 1 + floor(random() * 3)::int qty
                 from generate_series(1, 1 + floor(random() * 5)::int)) r) x
+    -- variante encore en vente à la date de la commande
+    join variants v on v.id = x.variant_id and (v.deactivated_at is null or v.deactivated_at > v_date)
     join prices pr on pr.variant_id = x.variant_id and pr.market = 'FR' and pr.currency = 'EUR'
                   and pr.valid_from <= v_date and (pr.valid_to is null or pr.valid_to > v_date);
+
+    -- si toutes les variantes tirées étaient retirées de la vente : 1 ligne avec une variante en vente
+    if not found then
+      insert into order_items (order_id, variant_id, quantity, unit_price, discount)
+      select v_order, v.id, 1, pr.amount,
+             case when v_red is not null then round(pr.amount * v_red / 100, 2) end
+      from variants v
+      join prices pr on pr.variant_id = v.id and pr.market = 'FR' and pr.currency = 'EUR'
+                    and pr.valid_from <= v_date and (pr.valid_to is null or pr.valid_to > v_date)
+      where v.deactivated_at is null or v.deactivated_at > v_date
+      order by random() limit 1;
+    end if;
   end loop;
 end $$;
 

@@ -32,7 +32,9 @@ create table users (
 create table addresses (
   id               bigint generated always as identity primary key,
   user_id          bigint      not null references users(id) on delete cascade,
-  address          text        not null,
+  address          text        not null,  -- numéro et rue
+  postal_code      text        not null,
+  city             text        not null,
   place            text,
   country          char(2)     not null check (country ~ '^[A-Z]{2}$'),  -- code ISO 3166-1 : FR, BE, US...
   default_delivery boolean     not null default false,
@@ -105,7 +107,8 @@ create table variants (
   size       text,
   color      text,
   reference  text        not null unique,
-  updated_at timestamptz not null default now()
+  updated_at timestamptz not null default now(),
+  deactivated_at timestamptz  -- NULL = variante active (en vente) ; on désactive au lieu de supprimer
 );
 create index on variants (product_id);
 
@@ -195,7 +198,9 @@ create table orders (
   first_name       text        not null,
   last_name        text        not null,
   email            text        not null,
-  shipping_address text        not null,
+  shipping_address     text    not null,  -- numéro et rue
+  shipping_postal_code text    not null,
+  shipping_city        text    not null,
   shipping_place   text,
   shipping_country char(2)     not null check (shipping_country ~ '^[A-Z]{2}$'),
   order_date       timestamptz not null default now(),
